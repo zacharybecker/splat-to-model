@@ -3,6 +3,8 @@ Shader "Custom/VertexColor"
     Properties
     {
         [Toggle] _DoubleSided ("Double Sided", Float) = 0
+        _AmbientStrength ("Ambient Strength", Range(0, 1)) = 0.7
+        _LightInfluence ("Light Influence", Range(0, 1)) = 0.3
     }
 
     SubShader
@@ -26,6 +28,9 @@ Shader "Custom/VertexColor"
 
             #include "UnityCG.cginc"
             #include "AutoLight.cginc"
+
+            float _AmbientStrength;
+            float _LightInfluence;
 
             struct appdata
             {
@@ -58,22 +63,20 @@ Shader "Custom/VertexColor"
 
             fixed4 frag (v2f i) : SV_Target
             {
-                // Basic diffuse lighting
-                float3 worldNormal = normalize(i.worldNormal);
-                float3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
-                
-                // Simple hemisphere lighting for ambient
-                float ndotl = dot(worldNormal, lightDir) * 0.5 + 0.5;
-                
                 // Vertex color as base
                 fixed4 col = i.color;
                 
-                // Apply lighting
-                col.rgb *= ndotl;
+                // Very soft lighting - mostly ambient with subtle directional influence
+                float3 worldNormal = normalize(i.worldNormal);
+                float3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
                 
-                // Apply shadow
-                fixed shadow = SHADOW_ATTENUATION(i);
-                col.rgb *= shadow;
+                // Half-lambert for soft falloff (no harsh shadows)
+                float ndotl = dot(worldNormal, lightDir) * 0.5 + 0.5;
+                
+                // Blend between full vertex color (ambient) and lit vertex color
+                // Default: 70% ambient + 30% lit = very subtle lighting
+                float lighting = lerp(1.0, ndotl, _LightInfluence);
+                col.rgb *= lerp(lighting, 1.0, _AmbientStrength);
                 
                 // Apply fog
                 UNITY_APPLY_FOG(i.fogCoord, col);

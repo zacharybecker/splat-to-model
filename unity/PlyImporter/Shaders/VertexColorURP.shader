@@ -1,5 +1,7 @@
 // Vertex Color shader for Universal Render Pipeline (URP)
 // Use this if your project uses URP instead of Built-in Render Pipeline
+// NOTE: This shader requires URP to be installed. If you're using Built-in RP,
+// use Custom/VertexColor or Custom/VertexColorUnlit instead.
 
 Shader "Custom/VertexColorURP"
 {
