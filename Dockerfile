@@ -23,10 +23,13 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy pipeline scripts
+# Copy pipeline scripts (original and improved)
 COPY splat_to_pointcloud.py .
 COPY pointcloud_to_mesh.py .
 COPY run_pipeline.py .
+COPY splat_to_pointcloud_improved.py .
+COPY pointcloud_to_mesh_improved.py .
+COPY run_pipeline_improved.py .
 
 # Create directories for input/output
 RUN mkdir -p /data/input /data/output
