@@ -1,10 +1,23 @@
-# Splat to Mesh Pipeline
+# Gaussian Splat Pipeline for Unity
 
-Convert Gaussian Splat PLY files (from Postshot/Jawset) to Unity-ready 3D meshes using Ball Pivoting Algorithm (BPA).
+Convert Gaussian Splat PLY files (from Postshot/Jawset) to Unity with two approaches:
 
+## Two Approaches
+
+### 1. Mesh Conversion (Traditional)
 ```
-Gaussian Splat (.ply) --> Point Cloud --> Mesh (.obj) --> Unity
+Gaussian Splat (.ply) --> Point Cloud --> Mesh (.obj) --> Unity (Standard Renderer)
 ```
+- Works with standard Unity workflow (physics, colliders, lightmaps)
+- Best for: game objects, mobile, WebGL
+
+### 2. Direct Splat Rendering (NEW)
+```
+Gaussian Splat (.ply) --> Enhanced Splat (.ply) --> Unity (Gaussian Splat Renderer)
+```
+- Preserves view-dependent effects (specularity, transparency)
+- Requires [UnityGaussianSplatting](https://github.com/aras-p/UnityGaussianSplatting)
+- Best for: photorealistic visualization, archviz, VR
 
 ## Prerequisites
 
@@ -55,6 +68,8 @@ services:
 
 ## Environment Variables
 
+### Mesh Mode (`splat-to-mesh`)
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `INPUT_FILE` | Input Gaussian Splat PLY file (required) | - |
@@ -70,6 +85,19 @@ services:
 | `SMOOTH_FINAL` | Apply Taubin smoothing | false |
 | `SMOOTH_ITERATIONS` | Number of smoothing iterations | 5 |
 | `KEEP_INTERMEDIATE` | Keep intermediate point cloud | false |
+| `VERBOSE` | Print progress information | true |
+
+### Enhance Mode (`splat-enhance`)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `INPUT_FILE` | Input Gaussian Splat PLY file (required) | - |
+| `OUTPUT_FILE` | Output enhanced PLY file (required) | - |
+| `REMOVE_FLOATERS` | Remove outlier Gaussians | true |
+| `DENSIFY_SPARSE` | Fill sparse regions with interpolated Gaussians | true |
+| `SPLIT_LARGE` | Split large/blobby Gaussians | true |
+| `GRID_RESOLUTION` | 3D grid resolution for sparse detection | 50 |
+| `DENSITY_THRESHOLD` | Percentile below which cells are "sparse" | 10 |
 | `VERBOSE` | Print progress information | true |
 
 ## Quality Presets
@@ -102,21 +130,27 @@ Edit the environment variables in `docker-compose.yml`:
 
 ## Example Usage
 
+### Mesh Mode (Default)
+
 ```powershell
 # Build and run with default settings
-docker compose up --build
+docker compose run --build splat-to-mesh
 
 # Run with custom env vars (one-off)
 docker compose run -e INPUT_FILE=scan.ply -e OUTPUT_FILE=result.obj splat-to-mesh
-
-# Or directly with docker run
-docker run -v ./data:/data \
-  -e INPUT_FILE=model.ply \
-  -e OUTPUT_FILE=mesh.obj \
-  -e OPACITY_THRESHOLD=0.2 \
-  -e DOUBLE_SIDED=true \
-  splat-to-mesh:latest
 ```
+
+### Enhance Mode (For Direct Splat Rendering)
+
+```powershell
+# Enhance a splat for direct rendering in Unity
+docker compose run --build splat-enhance
+
+# Custom enhancement settings
+docker compose run -e INPUT_FILE=scan.ply -e OUTPUT_FILE=enhanced.ply -e GRID_RESOLUTION=80 splat-enhance
+```
+
+See `SPLAT_RENDERING_GUIDE.md` for detailed documentation on direct splat rendering.
 
 ## Platform-Specific Triangle Counts
 
@@ -152,12 +186,20 @@ See `VIDEO_TO_UNITY_QUICKSTART.md` for detailed shader setup.
 project/
     data/
         model.ply              # Input: Gaussian Splat from Postshot
-        mesh.obj               # Output: Unity-ready mesh
+        mesh.obj               # Output: Unity-ready mesh (mesh mode)
+        enhanced.ply           # Output: Enhanced splat (enhance mode)
     
     # Pipeline scripts
     run_pipeline.py            # Main pipeline (reads env vars)
-    splat_to_pointcloud.py     # Stage 1: Extract points
-    pointcloud_to_mesh.py      # Stage 2: Generate mesh (BPA)
+    splat_to_pointcloud.py     # Extract points from splat
+    pointcloud_to_mesh.py      # Generate mesh (BPA/Poisson)
+    splat_enhance.py           # Enhance splat quality
+    splat_analyze.py           # Analyze splat for quality issues
+    
+    # Documentation
+    SPLAT_RENDERING_GUIDE.md   # Guide for direct splat rendering
+    VIDEO_TO_UNITY_QUICKSTART.md
+    PIPELINE_PLAN.md
     
     # Docker files
     Dockerfile

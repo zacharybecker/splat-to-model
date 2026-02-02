@@ -4,9 +4,16 @@ Splat to Mesh Pipeline Runner
 Runs the complete pipeline from Gaussian Splat PLY to Unity-ready mesh.
 Designed to run in Docker with configuration via environment variables.
 
+Supports two modes:
+1. MESH mode (default): Splat -> Point Cloud -> Mesh (for traditional Unity workflow)
+2. ENHANCE mode: Splat -> Enhanced Splat (for direct splat rendering in Unity)
+
 Environment Variables:
+    MODE                - "mesh" or "enhance" (default: mesh)
     INPUT_FILE          - Input Gaussian Splat PLY file (required)
     OUTPUT_FILE         - Output mesh file (required)
+    
+    # Mesh mode settings:
     OPACITY_THRESHOLD   - Minimum opacity for points (default: 0.3)
     MAX_SCALE           - Maximum Gaussian scale to include (optional)
     VOXEL_SIZE          - Voxel size for downsampling (default: auto, 0=disabled)
@@ -21,6 +28,14 @@ Environment Variables:
     POISSON_DEPTH       - Octree depth for Poisson (default: 8, higher=more detail)
     HOLE_FILL_DISTANCE  - Distance factor for hybrid hole filling (default: 3.0)
     KEEP_INTERMEDIATE   - Keep intermediate point cloud (default: false)
+    
+    # Enhance mode settings:
+    REMOVE_FLOATERS     - Remove outlier Gaussians (default: true)
+    DENSIFY_SPARSE      - Add Gaussians in sparse regions (default: true)
+    SPLIT_LARGE         - Split large Gaussians (default: true)
+    GRID_RESOLUTION     - Grid resolution for sparse detection (default: 50)
+    DENSITY_THRESHOLD   - Percentile for sparse threshold (default: 10)
+    
     VERBOSE             - Print progress (default: true)
 """
 
@@ -32,6 +47,7 @@ from datetime import datetime
 
 from splat_to_pointcloud import splat_to_pointcloud
 from pointcloud_to_mesh import pointcloud_to_mesh
+from splat_enhance import enhance_splat
 
 
 def get_env_bool(name, default=False):
@@ -275,6 +291,107 @@ def run_pipeline():
     return result
 
 
+def run_enhance_pipeline():
+    """Run the splat enhancement pipeline for direct splat rendering."""
+    
+    # Read configuration from environment
+    input_file = os.environ.get('INPUT_FILE')
+    output_file = os.environ.get('OUTPUT_FILE')
+    
+    if not input_file:
+        print("[ERROR] INPUT_FILE environment variable is required")
+        print("Example: INPUT_FILE=model.ply")
+        return None
+    
+    if not output_file:
+        print("[ERROR] OUTPUT_FILE environment variable is required")
+        print("Example: OUTPUT_FILE=enhanced.ply")
+        return None
+    
+    # Parse enhancement configuration
+    remove_floaters = get_env_bool('REMOVE_FLOATERS', True)
+    densify_sparse = get_env_bool('DENSIFY_SPARSE', True)
+    split_large = get_env_bool('SPLIT_LARGE', True)
+    grid_resolution = get_env_int('GRID_RESOLUTION', 50)
+    density_threshold = get_env_int('DENSITY_THRESHOLD', 10)
+    verbose = get_env_bool('VERBOSE', True)
+    
+    # Setup paths
+    input_path = Path('/data') / input_file
+    output_path = Path('/data') / output_file
+    
+    pipeline_start = time.time()
+    
+    # Validate input
+    if not input_path.exists():
+        print(f"[ERROR] Input file not found: {input_path}")
+        return None
+    
+    if verbose:
+        log_header("SPLAT ENHANCEMENT PIPELINE")
+        print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print()
+        print("  INPUT/OUTPUT:")
+        print(f"    Input file:  {input_path}")
+        print(f"    Input size:  {format_size(input_path)}")
+        print(f"    Output file: {output_path}")
+        print()
+        print("  CONFIGURATION:")
+        print(f"    REMOVE_FLOATERS:    {remove_floaters}")
+        print(f"    DENSIFY_SPARSE:     {densify_sparse}")
+        print(f"    SPLIT_LARGE:        {split_large}")
+        print(f"    GRID_RESOLUTION:    {grid_resolution}")
+        print(f"    DENSITY_THRESHOLD:  {density_threshold}")
+        print("=" * 70)
+        print()
+    
+    # Run enhancement
+    try:
+        stats = enhance_splat(
+            str(input_path),
+            str(output_path),
+            remove_floaters_enabled=remove_floaters,
+            densify_sparse_enabled=densify_sparse,
+            split_large_enabled=split_large,
+            grid_resolution=grid_resolution,
+            density_threshold_percentile=density_threshold,
+            verbose=verbose
+        )
+        
+        pipeline_time = time.time() - pipeline_start
+        
+        if verbose:
+            log_header("ENHANCEMENT PIPELINE SUMMARY")
+            print()
+            print(f"  STATUS:     SUCCESS")
+            print(f"  OUTPUT:     {output_path}")
+            if output_path.exists():
+                print(f"  FILE SIZE:  {format_size(output_path)}")
+            print()
+            print(f"  CHANGES:")
+            print(f"    Floaters removed:      {stats.get('floaters_removed', 0):,}")
+            print(f"    Sparse regions filled: {stats.get('sparse_added', 0):,}")
+            print(f"    Large Gaussians split: {stats.get('split_added', 0):,}")
+            print()
+            print(f"  TIMING: {format_time(pipeline_time)}")
+            print()
+            print("=" * 70)
+        
+        return stats
+        
+    except Exception as e:
+        print(f"[ERROR] Enhancement failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 if __name__ == "__main__":
-    result = run_pipeline()
+    mode = os.environ.get('MODE', 'mesh').lower()
+    
+    if mode == 'enhance':
+        result = run_enhance_pipeline()
+    else:
+        result = run_pipeline()
+    
     sys.exit(0 if result else 1)

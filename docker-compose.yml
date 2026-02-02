@@ -1,10 +1,24 @@
 services:
+  # ============================================================
+  # MESH MODE (default): Convert Gaussian Splat to traditional mesh
+  # Use: docker compose run splat-to-mesh
+  # ============================================================
   splat-to-mesh:
     build: .
-    image: splat-to-mesh:latest
+    image: splat-pipeline:latest
     volumes:
       - ./data:/data
     environment:
+      # ============================================================
+      # MODE SELECTION
+      # ============================================================
+      
+      # MODE: Pipeline mode to run
+      # - "mesh": Convert splat to mesh (traditional Unity workflow)
+      # - "enhance": Enhance splat quality (for direct splat rendering)
+      # - Default: mesh
+      - MODE=mesh
+      
       # ============================================================
       # REQUIRED - Input/Output Files
       # ============================================================
@@ -126,4 +140,69 @@ services:
       # - true: Show all processing steps, timings, and statistics
       # - false: Minimal output (errors only)
       # - Default: true
+      - VERBOSE=true
+
+  # ============================================================
+  # ENHANCE MODE: Improve Gaussian Splat quality for direct rendering
+  # Use: docker compose run splat-enhance
+  # For use with UnityGaussianSplatting: https://github.com/aras-p/UnityGaussianSplatting
+  # ============================================================
+  splat-enhance:
+    build: .
+    image: splat-pipeline:latest
+    volumes:
+      - ./data:/data
+    environment:
+      # MODE must be set to "enhance" for splat enhancement pipeline
+      - MODE=enhance
+      
+      # ============================================================
+      # REQUIRED - Input/Output Files
+      # ============================================================
+      
+      # INPUT_FILE: The Gaussian Splat PLY file to enhance (must exist in ./data folder)
+      - INPUT_FILE=model.ply
+      
+      # OUTPUT_FILE: The enhanced Gaussian Splat PLY filename
+      - OUTPUT_FILE=enhanced.ply
+      
+      # ============================================================
+      # Enhancement Operations
+      # ============================================================
+      
+      # REMOVE_FLOATERS: Remove outlier Gaussians (position/opacity/scale outliers)
+      # - true: Remove Gaussians that are likely artifacts
+      # - false: Keep all Gaussians
+      # - Default: true
+      - REMOVE_FLOATERS=true
+      
+      # DENSIFY_SPARSE: Add new Gaussians in sparse/under-represented regions
+      # - true: Detect sparse areas and fill with interpolated Gaussians
+      # - false: Don't add new Gaussians
+      # - Default: true
+      - DENSIFY_SPARSE=true
+      
+      # SPLIT_LARGE: Split large Gaussians into smaller ones
+      # - true: Break up blobby Gaussians for better coverage
+      # - false: Keep original Gaussian sizes
+      # - Default: true
+      - SPLIT_LARGE=true
+      
+      # ============================================================
+      # Enhancement Parameters
+      # ============================================================
+      
+      # GRID_RESOLUTION: Resolution of the 3D grid for sparse region detection
+      # - Lower values (20-30): Coarse detection, fills large holes
+      # - Higher values (80-100): Fine detection, fills small gaps
+      # - Default: 50
+      - GRID_RESOLUTION=50
+      
+      # DENSITY_THRESHOLD: Percentile below which a cell is considered "sparse"
+      # - Lower values (5-10): Conservative, only fills very sparse areas
+      # - Higher values (15-25): Aggressive, fills more areas
+      # - Default: 10
+      - DENSITY_THRESHOLD=10
+      
+      # VERBOSE: Print detailed progress
       - VERBOSE=true
