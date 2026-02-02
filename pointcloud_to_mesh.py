@@ -229,9 +229,9 @@ def ball_pivoting_reconstruction(pcd, radii=None, fill_holes=True, thin_geometry
 
 
 def fill_mesh_holes(mesh, hole_size=100, verbose=True):
-    """Fill holes in a mesh."""
+    """Clean up mesh geometry (remove degenerate triangles, etc.)."""
     if verbose:
-        print(f"    Attempting to fill holes...")
+        print(f"    Cleaning mesh geometry...")
     
     initial_triangles = len(mesh.triangles)
     mesh.compute_adjacency_list()
@@ -251,9 +251,290 @@ def fill_mesh_holes(mesh, hole_size=100, verbose=True):
                 print(f"    Mesh cleaned, {new_triangles:,} triangles")
     except Exception as e:
         if verbose:
-            print(f"    Hole filling skipped: {e}")
+            print(f"    Cleanup skipped: {e}")
     
     return mesh
+
+
+def get_boundary_vertices(mesh):
+    """
+    Find vertices on boundary edges (edges belonging to only one triangle).
+    These vertices are on the edges of holes.
+    """
+    triangles = np.asarray(mesh.triangles)
+    
+    # Build edge-to-triangle mapping
+    edge_count = {}
+    for tri_idx, tri in enumerate(triangles):
+        for i in range(3):
+            v1, v2 = tri[i], tri[(i + 1) % 3]
+            edge = tuple(sorted([v1, v2]))
+            edge_count[edge] = edge_count.get(edge, 0) + 1
+    
+    # Find boundary edges (appear in only one triangle)
+    boundary_vertices = set()
+    for edge, count in edge_count.items():
+        if count == 1:
+            boundary_vertices.add(edge[0])
+            boundary_vertices.add(edge[1])
+    
+    return np.array(list(boundary_vertices))
+
+
+def poisson_reconstruction(pcd, depth=9, density_threshold=0.01, verbose=True):
+    """
+    Perform Poisson surface reconstruction.
+    Returns mesh and the density values for artifact removal.
+    """
+    if verbose:
+        print("  " + "-" * 50)
+        print("  POISSON RECONSTRUCTION")
+        print("  " + "-" * 50)
+        print(f"    Input points: {len(pcd.points):,}")
+        print(f"    Depth: {depth}")
+    
+    recon_start = time.time()
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=depth, width=0, scale=1.1, linear_fit=False
+    )
+    recon_time = time.time() - recon_start
+    
+    if verbose:
+        print(f"    Reconstruction complete ({recon_time:.2f}s)")
+        print(f"    Raw vertices:  {len(mesh.vertices):,}")
+        print(f"    Raw triangles: {len(mesh.triangles):,}")
+    
+    # Trim low-density regions (exterior artifacts)
+    if density_threshold > 0:
+        densities = np.asarray(densities)
+        threshold = np.quantile(densities, density_threshold)
+        vertices_to_remove = densities < threshold
+        mesh.remove_vertices_by_mask(vertices_to_remove)
+        
+        if verbose:
+            print(f"    After density trimming ({density_threshold*100:.1f}% threshold):")
+            print(f"      Vertices:  {len(mesh.vertices):,}")
+            print(f"      Triangles: {len(mesh.triangles):,}")
+    
+    if verbose:
+        print()
+    
+    return mesh
+
+
+def hybrid_bpa_poisson_reconstruction(pcd, bpa_radii=None, poisson_depth=8, 
+                                       hole_fill_distance_factor=3.0,
+                                       thin_geometry=True, verbose=True):
+    """
+    Hybrid reconstruction: BPA for main surface (flat/sharp), Poisson for hole filling.
+    
+    Strategy:
+    1. Run BPA to get primary mesh with good flat surfaces
+    2. Identify boundary vertices (hole edges) in BPA mesh
+    3. Run Poisson reconstruction
+    4. Extract Poisson triangles near BPA hole boundaries
+    5. Merge BPA mesh with hole-filling Poisson triangles
+    """
+    if verbose:
+        print("  " + "-" * 50)
+        print("  HYBRID BPA + POISSON RECONSTRUCTION")
+        print("  " + "-" * 50)
+        print(f"    Input points: {len(pcd.points):,}")
+        print(f"    Strategy: BPA primary, Poisson hole-filling")
+        print()
+    
+    # Step 1: Run BPA reconstruction
+    if verbose:
+        print("    [STEP 1] Running BPA reconstruction...")
+    
+    distances = pcd.compute_nearest_neighbor_distance()
+    avg_dist = np.mean(distances)
+    min_dist = np.percentile(distances, 5)
+    max_dist = np.percentile(distances, 95)
+    
+    if bpa_radii is None:
+        # Expanded radii for better coverage
+        bpa_radii = [
+            min_dist * 0.5, min_dist * 0.75,
+            avg_dist * 0.5, avg_dist * 0.75, avg_dist,
+            avg_dist * 1.25, avg_dist * 1.5, avg_dist * 2,
+            avg_dist * 2.5, avg_dist * 3, avg_dist * 4,
+            max_dist * 2, max_dist * 3, max_dist * 4,
+        ]
+        if thin_geometry:
+            thin_radii = [min_dist * 0.25, min_dist * 0.33, avg_dist * 0.25, avg_dist * 0.33]
+            bpa_radii = thin_radii + bpa_radii
+        bpa_radii = sorted(set(r for r in bpa_radii if r > 0.0001))
+    
+    if verbose:
+        print(f"      Point spacing - min: {min_dist:.6f}, avg: {avg_dist:.6f}, max: {max_dist:.6f}")
+        print(f"      Using {len(bpa_radii)} BPA radii")
+    
+    bpa_start = time.time()
+    mesh_bpa = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd, o3d.utility.DoubleVector(bpa_radii)
+    )
+    bpa_time = time.time() - bpa_start
+    
+    if verbose:
+        print(f"      BPA complete ({bpa_time:.2f}s)")
+        print(f"      BPA vertices:  {len(mesh_bpa.vertices):,}")
+        print(f"      BPA triangles: {len(mesh_bpa.triangles):,}")
+    
+    if len(mesh_bpa.triangles) == 0:
+        if verbose:
+            print("      [WARNING] BPA produced no triangles, falling back to Poisson only")
+        return poisson_reconstruction(pcd, depth=poisson_depth, verbose=verbose)
+    
+    # Step 2: Find boundary vertices (hole edges)
+    if verbose:
+        print()
+        print("    [STEP 2] Identifying hole boundaries...")
+    
+    boundary_indices = get_boundary_vertices(mesh_bpa)
+    
+    if len(boundary_indices) == 0:
+        if verbose:
+            print("      No boundary edges found - BPA mesh is complete!")
+            print()
+        return mesh_bpa
+    
+    bpa_vertices = np.asarray(mesh_bpa.vertices)
+    boundary_points = bpa_vertices[boundary_indices]
+    
+    if verbose:
+        print(f"      Found {len(boundary_indices):,} boundary vertices (hole edges)")
+    
+    # Step 3: Run Poisson reconstruction
+    if verbose:
+        print()
+        print("    [STEP 3] Running Poisson reconstruction...")
+    
+    poisson_start = time.time()
+    mesh_poisson, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=poisson_depth, width=0, scale=1.1, linear_fit=False
+    )
+    poisson_time = time.time() - poisson_start
+    
+    # Trim exterior artifacts
+    densities = np.asarray(densities)
+    density_threshold = np.quantile(densities, 0.02)
+    vertices_to_remove = densities < density_threshold
+    mesh_poisson.remove_vertices_by_mask(vertices_to_remove)
+    
+    if verbose:
+        print(f"      Poisson complete ({poisson_time:.2f}s)")
+        print(f"      Poisson vertices:  {len(mesh_poisson.vertices):,}")
+        print(f"      Poisson triangles: {len(mesh_poisson.triangles):,}")
+    
+    if len(mesh_poisson.triangles) == 0:
+        if verbose:
+            print("      [WARNING] Poisson produced no triangles, returning BPA only")
+            print()
+        return mesh_bpa
+    
+    # Step 4: Extract Poisson triangles near boundary regions
+    if verbose:
+        print()
+        print("    [STEP 4] Extracting hole-filling triangles from Poisson...")
+    
+    # Build KD-tree of boundary points
+    boundary_pcd = o3d.geometry.PointCloud()
+    boundary_pcd.points = o3d.utility.Vector3dVector(boundary_points)
+    boundary_tree = o3d.geometry.KDTreeFlann(boundary_pcd)
+    
+    # Also build KD-tree of BPA vertices to check for overlap
+    bpa_pcd = o3d.geometry.PointCloud()
+    bpa_pcd.points = o3d.utility.Vector3dVector(bpa_vertices)
+    bpa_tree = o3d.geometry.KDTreeFlann(bpa_pcd)
+    
+    poisson_vertices = np.asarray(mesh_poisson.vertices)
+    poisson_triangles = np.asarray(mesh_poisson.triangles)
+    
+    # Distance threshold for "near boundary"
+    fill_distance = avg_dist * hole_fill_distance_factor
+    overlap_distance = avg_dist * 0.5  # Distance to consider as overlapping with BPA
+    
+    # Find Poisson triangles that are near boundary AND not overlapping BPA interior
+    hole_fill_triangles = []
+    
+    for tri_idx, tri in enumerate(poisson_triangles):
+        tri_vertices = poisson_vertices[tri]
+        centroid = np.mean(tri_vertices, axis=0)
+        
+        # Check if triangle centroid is near a boundary vertex
+        [k, idx, dist] = boundary_tree.search_knn_vector_3d(centroid, 1)
+        near_boundary = dist[0] < fill_distance ** 2  # squared distance
+        
+        if near_boundary:
+            # Check if triangle overlaps with BPA mesh interior
+            # (we want to fill holes, not duplicate existing geometry)
+            [k2, idx2, dist2] = bpa_tree.search_knn_vector_3d(centroid, 1)
+            overlaps_bpa = dist2[0] < overlap_distance ** 2
+            
+            # Also check if this is truly in a hole region by seeing if
+            # the nearest BPA vertex is a boundary vertex
+            if not overlaps_bpa or idx2[0] in boundary_indices:
+                hole_fill_triangles.append(tri_idx)
+    
+    if verbose:
+        print(f"      Fill distance threshold: {fill_distance:.6f}")
+        print(f"      Triangles selected for hole filling: {len(hole_fill_triangles):,}")
+    
+    if len(hole_fill_triangles) == 0:
+        if verbose:
+            print("      No hole-filling triangles found, returning BPA only")
+            print()
+        return mesh_bpa
+    
+    # Step 5: Merge meshes
+    if verbose:
+        print()
+        print("    [STEP 5] Merging BPA mesh with hole-filling triangles...")
+    
+    # Create hole-fill mesh from selected Poisson triangles
+    selected_tri_indices = np.array(hole_fill_triangles)
+    selected_triangles = poisson_triangles[selected_tri_indices]
+    
+    # Get unique vertices used by selected triangles
+    unique_vertex_indices = np.unique(selected_triangles.flatten())
+    
+    # Create vertex index mapping
+    old_to_new = {old: new for new, old in enumerate(unique_vertex_indices)}
+    
+    # Remap triangle indices
+    remapped_triangles = np.array([[old_to_new[v] for v in tri] for tri in selected_triangles])
+    
+    # Extract vertices
+    hole_fill_vertices = poisson_vertices[unique_vertex_indices]
+    
+    # Create hole-fill mesh
+    mesh_holes = o3d.geometry.TriangleMesh()
+    mesh_holes.vertices = o3d.utility.Vector3dVector(hole_fill_vertices)
+    mesh_holes.triangles = o3d.utility.Vector3iVector(remapped_triangles)
+    
+    # Transfer colors from Poisson if available
+    if mesh_poisson.has_vertex_colors():
+        poisson_colors = np.asarray(mesh_poisson.vertex_colors)
+        hole_fill_colors = poisson_colors[unique_vertex_indices]
+        mesh_holes.vertex_colors = o3d.utility.Vector3dVector(hole_fill_colors)
+    
+    # Merge: combine BPA and hole-fill meshes
+    merged_mesh = mesh_bpa + mesh_holes
+    
+    # Clean up merged mesh
+    merged_mesh.remove_duplicated_vertices()
+    merged_mesh.remove_duplicated_triangles()
+    merged_mesh.remove_degenerate_triangles()
+    merged_mesh.compute_vertex_normals()
+    
+    if verbose:
+        print(f"      BPA triangles:        {len(mesh_bpa.triangles):,}")
+        print(f"      Hole-fill triangles:  {len(mesh_holes.triangles):,}")
+        print(f"      Merged triangles:     {len(merged_mesh.triangles):,}")
+        print()
+    
+    return merged_mesh
 
 
 def transfer_colors(mesh, pcd, verbose=True):
@@ -510,10 +791,29 @@ def pointcloud_to_mesh(
     double_sided=False,
     smooth_final=False,
     smooth_iterations=5,
+    reconstruction_method="hybrid",
+    poisson_depth=8,
+    hole_fill_distance_factor=3.0,
     verbose=True
 ):
     """
-    Full pipeline: point cloud to mesh using Ball Pivoting Algorithm.
+    Full pipeline: point cloud to mesh.
+    
+    Args:
+        input_path: Path to input PLY point cloud
+        output_path: Path for output mesh
+        voxel_size: Voxel size for downsampling (None for auto)
+        target_triangles: Target triangle count for simplification (None to skip)
+        outlier_std_ratio: Standard deviation ratio for outlier removal
+        thin_geometry: Enable thin geometry handling in BPA
+        flip_normals: Flip all normals after reconstruction
+        double_sided: Make mesh double-sided (duplicate triangles)
+        smooth_final: Apply Taubin smoothing at the end
+        smooth_iterations: Number of smoothing iterations
+        reconstruction_method: "bpa", "poisson", or "hybrid" (default)
+        poisson_depth: Octree depth for Poisson reconstruction (higher = more detail)
+        hole_fill_distance_factor: How far from hole boundaries to look for fill triangles
+        verbose: Print progress information
     """
     total_start = time.time()
     
@@ -536,11 +836,22 @@ def pointcloud_to_mesh(
     # Estimate normals
     pcd = estimate_normals(pcd, verbose=verbose)
     
-    # BPA reconstruction
-    mesh = ball_pivoting_reconstruction(pcd, fill_holes=True, thin_geometry=thin_geometry, verbose=verbose)
+    # Surface reconstruction
+    if reconstruction_method == "poisson":
+        mesh = poisson_reconstruction(pcd, depth=poisson_depth, verbose=verbose)
+    elif reconstruction_method == "hybrid":
+        mesh = hybrid_bpa_poisson_reconstruction(
+            pcd, 
+            poisson_depth=poisson_depth,
+            hole_fill_distance_factor=hole_fill_distance_factor,
+            thin_geometry=thin_geometry, 
+            verbose=verbose
+        )
+    else:  # "bpa" or default
+        mesh = ball_pivoting_reconstruction(pcd, fill_holes=True, thin_geometry=thin_geometry, verbose=verbose)
     
     if len(mesh.triangles) == 0:
-        print("  [ERROR] BPA produced no triangles")
+        print(f"  [ERROR] {reconstruction_method.upper()} produced no triangles")
         return None
     
     # Fix normals
@@ -578,6 +889,7 @@ def pointcloud_to_mesh(
         print("  " + "-" * 50)
         print("  MESH GENERATION SUMMARY")
         print("  " + "-" * 50)
+        print(f"    Reconstruction method: {reconstruction_method.upper()}")
         print(f"    Total processing time: {total_time:.2f}s")
         print(f"    Final mesh:")
         print(f"      Vertices:  {len(mesh.vertices):,}")

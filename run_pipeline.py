@@ -17,6 +17,9 @@ Environment Variables:
     DOUBLE_SIDED        - Make mesh double-sided (default: false)
     SMOOTH_FINAL        - Apply smoothing (default: false)
     SMOOTH_ITERATIONS   - Number of smoothing iterations (default: 5)
+    RECONSTRUCTION_METHOD - "bpa", "poisson", or "hybrid" (default: hybrid)
+    POISSON_DEPTH       - Octree depth for Poisson (default: 8, higher=more detail)
+    HOLE_FILL_DISTANCE  - Distance factor for hybrid hole filling (default: 3.0)
     KEEP_INTERMEDIATE   - Keep intermediate point cloud (default: false)
     VERBOSE             - Print progress (default: true)
 """
@@ -121,8 +124,16 @@ def run_pipeline():
     double_sided = get_env_bool('DOUBLE_SIDED', False)
     smooth_final = get_env_bool('SMOOTH_FINAL', False)
     smooth_iterations = get_env_int('SMOOTH_ITERATIONS', 5)
+    reconstruction_method = os.environ.get('RECONSTRUCTION_METHOD', 'hybrid').lower()
+    poisson_depth = get_env_int('POISSON_DEPTH', 8)
+    hole_fill_distance = get_env_float('HOLE_FILL_DISTANCE', 3.0)
     keep_intermediate = get_env_bool('KEEP_INTERMEDIATE', False)
     verbose = get_env_bool('VERBOSE', True)
+    
+    # Validate reconstruction method
+    if reconstruction_method not in ('bpa', 'poisson', 'hybrid'):
+        print(f"[WARNING] Invalid RECONSTRUCTION_METHOD: {reconstruction_method}, using 'hybrid'")
+        reconstruction_method = 'hybrid'
     
     # Setup paths
     input_path = Path('/data') / input_file
@@ -139,7 +150,8 @@ def run_pipeline():
     pointcloud_path = output_path.parent / f"{input_path.stem}_pointcloud.ply"
     
     if verbose:
-        log_header("SPLAT TO MESH PIPELINE (BPA)")
+        method_label = reconstruction_method.upper()
+        log_header(f"SPLAT TO MESH PIPELINE ({method_label})")
         print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print()
         print("  INPUT/OUTPUT:")
@@ -148,20 +160,25 @@ def run_pipeline():
         print(f"    Output file: {output_path}")
         print()
         print("  CONFIGURATION:")
-        print(f"    OPACITY_THRESHOLD:  {opacity_threshold}")
+        print(f"    OPACITY_THRESHOLD:     {opacity_threshold}")
         if max_scale is not None:
-            print(f"    MAX_SCALE:          {max_scale}")
-        print(f"    VOXEL_SIZE:         {voxel_size if voxel_size is not None else 'auto'}")
+            print(f"    MAX_SCALE:             {max_scale}")
+        print(f"    VOXEL_SIZE:            {voxel_size if voxel_size is not None else 'auto'}")
         if target_triangles is not None:
-            print(f"    TARGET_TRIANGLES:   {target_triangles}")
-        print(f"    OUTLIER_STD_RATIO:  {outlier_std_ratio}")
-        print(f"    THIN_GEOMETRY:      {thin_geometry}")
-        print(f"    FLIP_NORMALS:       {flip_normals}")
-        print(f"    DOUBLE_SIDED:       {double_sided}")
-        print(f"    SMOOTH_FINAL:       {smooth_final}")
+            print(f"    TARGET_TRIANGLES:      {target_triangles}")
+        print(f"    OUTLIER_STD_RATIO:     {outlier_std_ratio}")
+        print(f"    RECONSTRUCTION_METHOD: {reconstruction_method.upper()}")
+        if reconstruction_method in ('poisson', 'hybrid'):
+            print(f"    POISSON_DEPTH:         {poisson_depth}")
+        if reconstruction_method == 'hybrid':
+            print(f"    HOLE_FILL_DISTANCE:    {hole_fill_distance}")
+        print(f"    THIN_GEOMETRY:         {thin_geometry}")
+        print(f"    FLIP_NORMALS:          {flip_normals}")
+        print(f"    DOUBLE_SIDED:          {double_sided}")
+        print(f"    SMOOTH_FINAL:          {smooth_final}")
         if smooth_final:
-            print(f"    SMOOTH_ITERATIONS:  {smooth_iterations}")
-        print(f"    KEEP_INTERMEDIATE:  {keep_intermediate}")
+            print(f"    SMOOTH_ITERATIONS:     {smooth_iterations}")
+        print(f"    KEEP_INTERMEDIATE:     {keep_intermediate}")
         print("=" * 70)
         print()
     
@@ -191,9 +208,9 @@ def run_pipeline():
         if pointcloud_path.exists():
             print(f"  [STAGE 1 OUTPUT] Point cloud size: {format_size(pointcloud_path)}")
     
-    # Stage 2: Convert point cloud to mesh using BPA
+    # Stage 2: Convert point cloud to mesh
     if verbose:
-        log_header("STAGE 2: Mesh Generation (BPA)")
+        log_header(f"STAGE 2: Mesh Generation ({reconstruction_method.upper()})")
         print()
     
     stage2_start = time.time()
@@ -208,6 +225,9 @@ def run_pipeline():
         double_sided=double_sided,
         smooth_final=smooth_final,
         smooth_iterations=smooth_iterations,
+        reconstruction_method=reconstruction_method,
+        poisson_depth=poisson_depth,
+        hole_fill_distance_factor=hole_fill_distance,
         verbose=verbose
     )
     stage2_time = time.time() - stage2_start

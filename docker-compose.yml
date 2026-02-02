@@ -35,8 +35,28 @@ services:
       # - MAX_SCALE=0.05
       
       # ============================================================
-      # STAGE 2: Mesh Generation (point cloud -> mesh via Ball Pivoting)
+      # STAGE 2: Mesh Generation (point cloud -> mesh)
       # ============================================================
+      
+      # RECONSTRUCTION_METHOD: Surface reconstruction algorithm to use
+      # - "bpa": Ball Pivoting Algorithm only (flat surfaces, may have holes)
+      # - "poisson": Poisson reconstruction only (watertight, but can be "bubbly")
+      # - "hybrid": BPA for main surfaces + Poisson to fill holes (best of both)
+      # - Default: hybrid
+      - RECONSTRUCTION_METHOD=hybrid
+      
+      # POISSON_DEPTH: Octree depth for Poisson reconstruction (used in "poisson" and "hybrid" modes)
+      # - Lower values (6-7): Faster, smoother, less detail
+      # - Higher values (9-11): Slower, more detail preserved
+      # - Default: 8 (balanced)
+      # - POISSON_DEPTH=8
+      
+      # HOLE_FILL_DISTANCE: Distance factor for hybrid hole filling (only used in "hybrid" mode)
+      # - Controls how far from hole boundaries to look for Poisson fill triangles
+      # - Lower values (1.5-2.0): Conservative filling, fewer Poisson triangles
+      # - Higher values (4.0-6.0): Aggressive filling, more coverage but may add "bubbly" areas
+      # - Default: 3.0
+      # - HOLE_FILL_DISTANCE=3.0
       
       # VOXEL_SIZE: Voxel size for point cloud downsampling before meshing
       # - Unset: Auto-calculate based on point cloud density (recommended)
@@ -46,7 +66,7 @@ services:
       # - VOXEL_SIZE=0
       
       # TARGET_TRIANGLES: Simplify final mesh to this triangle count
-      # - Unset: No simplification (keep all triangles from BPA reconstruction)
+      # - Unset: No simplification (keep all triangles from reconstruction)
       # - Low values (10000-50000): Lightweight mesh for mobile/web
       # - High values (100000+): Detailed mesh for desktop/film
       # - Default: unset (no simplification)
