@@ -309,6 +309,306 @@ def remove_floaters(splat, std_threshold=3.0, min_opacity=0.05, verbose=True):
     return splat, n_removed
 
 
+def statistical_outlier_removal(splat, k_neighbors=20, std_ratio=2.0, verbose=True):
+    """
+    Remove Gaussians that have significantly fewer neighbors than expected.
+    
+    This is the classic Statistical Outlier Removal (SOR) algorithm used in
+    point cloud processing. Points with mean neighbor distance > (global_mean + std_ratio * global_std)
+    are considered outliers.
+    
+    Args:
+        splat: GaussianSplat object
+        k_neighbors: Number of neighbors to consider
+        std_ratio: Points beyond this many std devs in mean neighbor distance are removed
+        verbose: Print progress
+    
+    Returns:
+        Modified splat, number removed
+    """
+    if verbose:
+        print("\n  " + "-" * 50)
+        print("  STATISTICAL OUTLIER REMOVAL (SOR)")
+        print("  " + "-" * 50)
+    
+    n_original = len(splat)
+    
+    if n_original < k_neighbors + 1:
+        if verbose:
+            print("    Too few Gaussians for SOR")
+        return splat, 0
+    
+    # Build KD-tree
+    tree = KDTree(splat.positions)
+    
+    # For each point, compute mean distance to k nearest neighbors
+    distances, _ = tree.query(splat.positions, k=k_neighbors + 1)
+    # Exclude self (distance 0), take mean of remaining
+    mean_distances = np.mean(distances[:, 1:], axis=1)
+    
+    # Compute global statistics
+    global_mean = np.mean(mean_distances)
+    global_std = np.std(mean_distances)
+    
+    # Points with large mean neighbor distance are outliers
+    threshold = global_mean + std_ratio * global_std
+    keep_mask = mean_distances <= threshold
+    
+    n_removed = n_original - np.sum(keep_mask)
+    
+    if verbose:
+        print(f"    Mean neighbor distance threshold: {threshold:.6f}")
+        print(f"    Outliers detected: {n_removed:,}")
+    
+    if n_removed == 0:
+        return splat, 0
+    
+    # Apply mask
+    splat.positions = splat.positions[keep_mask]
+    if splat.opacity is not None:
+        splat.opacity = splat.opacity[keep_mask]
+    if splat.scales is not None:
+        splat.scales = splat.scales[keep_mask]
+    if splat.rotations is not None:
+        splat.rotations = splat.rotations[keep_mask]
+    if splat.colors_dc is not None:
+        splat.colors_dc = splat.colors_dc[keep_mask]
+    if splat.colors_rest is not None:
+        splat.colors_rest = splat.colors_rest[keep_mask]
+    
+    if verbose:
+        print(f"    Remaining: {len(splat):,}")
+    
+    return splat, n_removed
+
+
+def cluster_outlier_removal(splat, eps_percentile=5, min_samples=10, min_cluster_ratio=0.01, verbose=True):
+    """
+    Remove small isolated clusters using DBSCAN clustering.
+    
+    Identifies the main cluster(s) of Gaussians and removes small isolated groups
+    that are likely floaters or artifacts.
+    
+    Args:
+        splat: GaussianSplat object
+        eps_percentile: DBSCAN epsilon as percentile of nearest neighbor distances
+        min_samples: Minimum samples for DBSCAN core point
+        min_cluster_ratio: Remove clusters with fewer than this ratio of total points
+        verbose: Print progress
+    
+    Returns:
+        Modified splat, number removed
+    """
+    if verbose:
+        print("\n  " + "-" * 50)
+        print("  CLUSTER-BASED OUTLIER REMOVAL (DBSCAN)")
+        print("  " + "-" * 50)
+    
+    n_original = len(splat)
+    
+    if n_original < min_samples * 2:
+        if verbose:
+            print("    Too few Gaussians for clustering")
+        return splat, 0
+    
+    # Estimate eps from data - use percentile of nearest neighbor distances
+    tree = KDTree(splat.positions)
+    distances, _ = tree.query(splat.positions, k=2)  # k=2 to get nearest neighbor (not self)
+    nn_distances = distances[:, 1]
+    eps = np.percentile(nn_distances, eps_percentile)
+    
+    if verbose:
+        print(f"    DBSCAN epsilon (p{eps_percentile} of NN distances): {eps:.6f}")
+        print(f"    Min samples per cluster: {min_samples}")
+    
+    # Simple DBSCAN implementation without sklearn dependency
+    # Label: -1 = noise, 0+ = cluster ID
+    labels = np.full(n_original, -1, dtype=np.int32)
+    cluster_id = 0
+    
+    # Find core points (points with at least min_samples neighbors within eps)
+    neighbor_counts = tree.query_ball_point(splat.positions, eps, return_length=True)
+    core_mask = neighbor_counts >= min_samples
+    
+    if verbose:
+        print(f"    Core points: {np.sum(core_mask):,}")
+    
+    visited = np.zeros(n_original, dtype=bool)
+    
+    for i in range(n_original):
+        if visited[i] or not core_mask[i]:
+            continue
+        
+        # Start a new cluster
+        cluster_points = []
+        stack = [i]
+        
+        while stack:
+            point_idx = stack.pop()
+            if visited[point_idx]:
+                continue
+            
+            visited[point_idx] = True
+            labels[point_idx] = cluster_id
+            cluster_points.append(point_idx)
+            
+            if core_mask[point_idx]:
+                # Add unvisited neighbors
+                neighbors = tree.query_ball_point(splat.positions[point_idx], eps)
+                for neighbor in neighbors:
+                    if not visited[neighbor]:
+                        stack.append(neighbor)
+        
+        cluster_id += 1
+    
+    # Assign non-core points to nearest cluster if within eps
+    noise_indices = np.where(labels == -1)[0]
+    for idx in noise_indices:
+        neighbors = tree.query_ball_point(splat.positions[idx], eps)
+        neighbor_labels = labels[neighbors]
+        valid_labels = neighbor_labels[neighbor_labels >= 0]
+        if len(valid_labels) > 0:
+            # Assign to most common neighboring cluster
+            labels[idx] = np.bincount(valid_labels).argmax()
+    
+    # Count cluster sizes
+    unique_labels = np.unique(labels)
+    cluster_sizes = {}
+    for label in unique_labels:
+        cluster_sizes[label] = np.sum(labels == label)
+    
+    if verbose:
+        print(f"    Clusters found: {len([l for l in unique_labels if l >= 0])}")
+        print(f"    Noise points: {cluster_sizes.get(-1, 0):,}")
+    
+    # Determine which clusters to keep (larger than min_cluster_ratio of total)
+    min_cluster_size = int(n_original * min_cluster_ratio)
+    keep_mask = np.zeros(n_original, dtype=bool)
+    
+    clusters_kept = 0
+    for label, size in cluster_sizes.items():
+        if label >= 0 and size >= min_cluster_size:
+            keep_mask[labels == label] = True
+            clusters_kept += 1
+            if verbose:
+                print(f"    Keeping cluster {label}: {size:,} Gaussians")
+    
+    # Always keep noise points if they passed other filters and we have no clusters
+    if clusters_kept == 0:
+        if verbose:
+            print("    No clusters large enough - keeping all points")
+        return splat, 0
+    
+    n_removed = n_original - np.sum(keep_mask)
+    
+    if verbose:
+        print(f"    Clusters kept: {clusters_kept}")
+        print(f"    Gaussians removed: {n_removed:,}")
+    
+    if n_removed == 0:
+        return splat, 0
+    
+    # Apply mask
+    splat.positions = splat.positions[keep_mask]
+    if splat.opacity is not None:
+        splat.opacity = splat.opacity[keep_mask]
+    if splat.scales is not None:
+        splat.scales = splat.scales[keep_mask]
+    if splat.rotations is not None:
+        splat.rotations = splat.rotations[keep_mask]
+    if splat.colors_dc is not None:
+        splat.colors_dc = splat.colors_dc[keep_mask]
+    if splat.colors_rest is not None:
+        splat.colors_rest = splat.colors_rest[keep_mask]
+    
+    if verbose:
+        print(f"    Remaining: {len(splat):,}")
+    
+    return splat, n_removed
+
+
+def remove_isolated_gaussians(splat, radius_percentile=10, min_neighbors=3, verbose=True):
+    """
+    Remove Gaussians that have too few neighbors within a local radius.
+    
+    This catches small specks and isolated floaters that might not be caught
+    by the clustering approach.
+    
+    Args:
+        splat: GaussianSplat object
+        radius_percentile: Search radius as percentile of all pairwise distances
+        min_neighbors: Minimum neighbors required within radius to keep a Gaussian
+        verbose: Print progress
+    
+    Returns:
+        Modified splat, number removed
+    """
+    if verbose:
+        print("\n  " + "-" * 50)
+        print("  ISOLATED GAUSSIAN REMOVAL")
+        print("  " + "-" * 50)
+    
+    n_original = len(splat)
+    
+    if n_original < 100:
+        if verbose:
+            print("    Too few Gaussians for isolation detection")
+        return splat, 0
+    
+    # Estimate search radius from data
+    tree = KDTree(splat.positions)
+    
+    # Sample to estimate radius (full pairwise is too expensive)
+    sample_size = min(1000, n_original)
+    sample_indices = np.random.choice(n_original, sample_size, replace=False)
+    sample_positions = splat.positions[sample_indices]
+    
+    # Get distances to k nearest neighbors for samples
+    k = min(20, n_original - 1)
+    distances, _ = tree.query(sample_positions, k=k + 1)
+    all_distances = distances[:, 1:].flatten()  # Exclude self
+    
+    # Use percentile as radius
+    radius = np.percentile(all_distances, radius_percentile)
+    
+    if verbose:
+        print(f"    Search radius (p{radius_percentile}): {radius:.6f}")
+        print(f"    Minimum neighbors required: {min_neighbors}")
+    
+    # Count neighbors within radius for each point
+    neighbor_counts = tree.query_ball_point(splat.positions, radius, return_length=True)
+    # Subtract 1 to exclude self
+    neighbor_counts = neighbor_counts - 1
+    
+    # Keep points with enough neighbors
+    keep_mask = neighbor_counts >= min_neighbors
+    n_removed = n_original - np.sum(keep_mask)
+    
+    if verbose:
+        print(f"    Isolated Gaussians found: {n_removed:,}")
+    
+    if n_removed == 0:
+        return splat, 0
+    
+    # Apply mask
+    splat.positions = splat.positions[keep_mask]
+    if splat.opacity is not None:
+        splat.opacity = splat.opacity[keep_mask]
+    if splat.scales is not None:
+        splat.scales = splat.scales[keep_mask]
+    if splat.rotations is not None:
+        splat.rotations = splat.rotations[keep_mask]
+    if splat.colors_dc is not None:
+        splat.colors_dc = splat.colors_dc[keep_mask]
+    if splat.colors_rest is not None:
+        splat.colors_rest = splat.colors_rest[keep_mask]
+    
+    if verbose:
+        print(f"    Remaining: {len(splat):,}")
+    
+    return splat, n_removed
+
+
 def find_sparse_regions(splat, grid_resolution=50, density_threshold_percentile=10, verbose=True):
     """
     Find regions where Gaussian density is low (potential holes).
@@ -1012,11 +1312,25 @@ def enhance_splat(input_path, output_path,
                   plane_detection_enabled=False,
                   depth_consistency_enabled=False,
                   thickness_compression_enabled=False,
+                  # Aggressive floater removal options
+                  sor_filter_enabled=False,
+                  cluster_filter_enabled=False,
+                  isolation_filter_enabled=False,
                   grid_resolution=50,
                   density_threshold_percentile=10,
                   # Floater removal parameters
                   floater_std_threshold=3.0,
                   floater_min_opacity=0.05,
+                  # SOR parameters
+                  sor_k_neighbors=20,
+                  sor_std_ratio=2.0,
+                  # Cluster filter parameters
+                  cluster_eps_percentile=5,
+                  cluster_min_samples=10,
+                  cluster_min_ratio=0.01,
+                  # Isolation filter parameters
+                  isolation_radius_percentile=10,
+                  isolation_min_neighbors=3,
                   # Densification parameters
                   densify_k_neighbors=5,
                   densify_jitter=0.02,
@@ -1043,16 +1357,26 @@ def enhance_splat(input_path, output_path,
     Args:
         input_path: Path to input PLY file
         output_path: Path to output PLY file
-        remove_floaters_enabled: Remove outlier Gaussians
+        remove_floaters_enabled: Remove outlier Gaussians (basic)
         densify_sparse_enabled: Add Gaussians in sparse regions
         split_large_enabled: Split large Gaussians
         plane_detection_enabled: Detect planes and flatten Gaussians to them
         depth_consistency_enabled: Filter depth outliers in local neighborhoods
         thickness_compression_enabled: Compress overly thick surface regions
+        sor_filter_enabled: Statistical Outlier Removal (aggressive floater removal)
+        cluster_filter_enabled: DBSCAN clustering to remove isolated clusters
+        isolation_filter_enabled: Remove isolated Gaussians with few neighbors
         grid_resolution: Resolution for sparse detection grid
         density_threshold_percentile: What percentile is "sparse"
         floater_std_threshold: Remove points beyond this many std devs from centroid
         floater_min_opacity: Remove Gaussians with opacity below this threshold
+        sor_k_neighbors: Neighbors for SOR algorithm
+        sor_std_ratio: Std ratio threshold for SOR
+        cluster_eps_percentile: DBSCAN epsilon percentile
+        cluster_min_samples: DBSCAN min samples
+        cluster_min_ratio: Minimum cluster size ratio to keep
+        isolation_radius_percentile: Search radius percentile for isolation detection
+        isolation_min_neighbors: Minimum neighbors to not be considered isolated
         densify_k_neighbors: Number of neighbors to interpolate from when densifying
         densify_jitter: Random offset factor for new Gaussians (relative to local scale)
         split_threshold_percentile: Split Gaussians above this percentile in scale
@@ -1085,6 +1409,9 @@ def enhance_splat(input_path, output_path,
     stats = {
         'original_count': n_original,
         'floaters_removed': 0,
+        'sor_removed': 0,
+        'cluster_removed': 0,
+        'isolated_removed': 0,
         'planes_detected': 0,
         'plane_flattened': 0,
         'depth_outliers': 0,
@@ -1093,7 +1420,7 @@ def enhance_splat(input_path, output_path,
         'split_added': 0,
     }
     
-    # Step 1: Remove floaters
+    # Step 1: Remove floaters (basic)
     if remove_floaters_enabled:
         splat, n_removed = remove_floaters(
             splat, 
@@ -1102,6 +1429,37 @@ def enhance_splat(input_path, output_path,
             verbose=verbose
         )
         stats['floaters_removed'] = n_removed
+    
+    # Step 1b: Statistical Outlier Removal (aggressive)
+    if sor_filter_enabled:
+        splat, n_sor = statistical_outlier_removal(
+            splat,
+            k_neighbors=sor_k_neighbors,
+            std_ratio=sor_std_ratio,
+            verbose=verbose
+        )
+        stats['sor_removed'] = n_sor
+    
+    # Step 1c: Cluster-based outlier removal (DBSCAN)
+    if cluster_filter_enabled:
+        splat, n_cluster = cluster_outlier_removal(
+            splat,
+            eps_percentile=cluster_eps_percentile,
+            min_samples=cluster_min_samples,
+            min_cluster_ratio=cluster_min_ratio,
+            verbose=verbose
+        )
+        stats['cluster_removed'] = n_cluster
+    
+    # Step 1d: Isolated Gaussian removal
+    if isolation_filter_enabled:
+        splat, n_isolated = remove_isolated_gaussians(
+            splat,
+            radius_percentile=isolation_radius_percentile,
+            min_neighbors=isolation_min_neighbors,
+            verbose=verbose
+        )
+        stats['isolated_removed'] = n_isolated
     
     # Step 2: Plane detection and flattening (for walls, floors, etc.)
     if plane_detection_enabled:
@@ -1187,6 +1545,12 @@ def enhance_splat(input_path, output_path,
     print("=" * 60)
     print(f"  Original Gaussians:    {stats['original_count']:,}")
     print(f"  Floaters removed:      {stats['floaters_removed']:,}")
+    if sor_filter_enabled:
+        print(f"  SOR outliers removed:  {stats['sor_removed']:,}")
+    if cluster_filter_enabled:
+        print(f"  Cluster outliers:      {stats['cluster_removed']:,}")
+    if isolation_filter_enabled:
+        print(f"  Isolated removed:      {stats['isolated_removed']:,}")
     if plane_detection_enabled:
         print(f"  Planes detected:       {stats['planes_detected']}")
         print(f"  Flattened to planes:   {stats['plane_flattened']:,}")
@@ -1215,17 +1579,17 @@ Examples:
     # Only remove floaters
     python splat_enhance.py input.ply output.ply --no-densify --no-split
     
-    # Aggressive hole filling
-    python splat_enhance.py input.ply output.ply --grid 30 --density-threshold 20
+    # Aggressive floater removal (recommended for messy scans)
+    python splat_enhance.py input.ply output.ply --sor-filter --cluster-filter --isolation-filter
     
-    # Fine grid for detailed models
-    python splat_enhance.py input.ply output.ply --grid 100
+    # Maximum cleanup - all aggressive filters
+    python splat_enhance.py input.ply output.ply --sor-filter --cluster-filter --isolation-filter --no-densify --no-split
     
     # Room/indoor scene with reflections - flatten to walls
     python splat_enhance.py input.ply output.ply --flatten-planes --depth-filter
     
-    # Aggressive reflection artifact removal
-    python splat_enhance.py input.ply output.ply --flatten-planes --depth-filter --compress-thickness
+    # Full cleanup for indoor scenes
+    python splat_enhance.py input.ply output.ply --sor-filter --cluster-filter --flatten-planes --depth-filter
     
     # Fine-tune plane detection for large rooms
     python splat_enhance.py input.ply output.ply --flatten-planes --plane-max 20 --plane-distance 0.1
@@ -1250,6 +1614,14 @@ Examples:
     parser.add_argument("--compress-thickness", action="store_true",
                         help="Compress overly thick surface regions")
     
+    # Aggressive floater removal options
+    parser.add_argument("--sor-filter", action="store_true",
+                        help="Enable Statistical Outlier Removal (removes isolated specks)")
+    parser.add_argument("--cluster-filter", action="store_true",
+                        help="Enable DBSCAN cluster filtering (removes small isolated clusters)")
+    parser.add_argument("--isolation-filter", action="store_true",
+                        help="Enable isolation filter (removes Gaussians with few neighbors)")
+    
     parser.add_argument("--grid", type=int, default=50,
                         help="Grid resolution for sparse detection (default: 50)")
     parser.add_argument("--density-threshold", type=int, default=10,
@@ -1260,6 +1632,26 @@ Examples:
                         help="Std dev threshold for position outliers (default: 3.0)")
     parser.add_argument("--floater-min-opacity", type=float, default=0.05,
                         help="Minimum opacity threshold (default: 0.05)")
+    
+    # SOR filter parameters
+    parser.add_argument("--sor-neighbors", type=int, default=20,
+                        help="Number of neighbors for SOR (default: 20)")
+    parser.add_argument("--sor-std-ratio", type=float, default=2.0,
+                        help="Std ratio threshold for SOR outliers (default: 2.0)")
+    
+    # Cluster filter parameters
+    parser.add_argument("--cluster-eps-percentile", type=int, default=5,
+                        help="DBSCAN epsilon as percentile of NN distances (default: 5)")
+    parser.add_argument("--cluster-min-samples", type=int, default=10,
+                        help="Minimum samples for DBSCAN core point (default: 10)")
+    parser.add_argument("--cluster-min-ratio", type=float, default=0.01,
+                        help="Minimum cluster size ratio to keep (default: 0.01)")
+    
+    # Isolation filter parameters
+    parser.add_argument("--isolation-radius-percentile", type=int, default=10,
+                        help="Search radius as percentile of distances (default: 10)")
+    parser.add_argument("--isolation-min-neighbors", type=int, default=3,
+                        help="Minimum neighbors to not be isolated (default: 3)")
     
     # Densification parameters
     parser.add_argument("--densify-neighbors", type=int, default=5,
@@ -1313,10 +1705,20 @@ Examples:
         plane_detection_enabled=args.flatten_planes,
         depth_consistency_enabled=args.depth_filter,
         thickness_compression_enabled=args.compress_thickness,
+        sor_filter_enabled=args.sor_filter,
+        cluster_filter_enabled=args.cluster_filter,
+        isolation_filter_enabled=args.isolation_filter,
         grid_resolution=args.grid,
         density_threshold_percentile=args.density_threshold,
         floater_std_threshold=args.floater_std,
         floater_min_opacity=args.floater_min_opacity,
+        sor_k_neighbors=args.sor_neighbors,
+        sor_std_ratio=args.sor_std_ratio,
+        cluster_eps_percentile=args.cluster_eps_percentile,
+        cluster_min_samples=args.cluster_min_samples,
+        cluster_min_ratio=args.cluster_min_ratio,
+        isolation_radius_percentile=args.isolation_radius_percentile,
+        isolation_min_neighbors=args.isolation_min_neighbors,
         densify_k_neighbors=args.densify_neighbors,
         densify_jitter=args.densify_jitter,
         split_threshold_percentile=args.split_percentile,

@@ -40,6 +40,18 @@ Environment Variables:
     FLOATER_STD_THRESHOLD   - Std dev threshold for position outliers (default: 3.0)
     FLOATER_MIN_OPACITY     - Minimum opacity threshold (default: 0.05)
     
+    # Aggressive floater removal (for messy scans):
+    SOR_FILTER              - Enable Statistical Outlier Removal (default: false)
+    SOR_K_NEIGHBORS         - Neighbors for SOR (default: 20)
+    SOR_STD_RATIO           - Std ratio for SOR outliers (default: 2.0)
+    CLUSTER_FILTER          - Enable DBSCAN cluster filtering (default: false)
+    CLUSTER_EPS_PERCENTILE  - DBSCAN epsilon percentile (default: 5)
+    CLUSTER_MIN_SAMPLES     - DBSCAN min samples (default: 10)
+    CLUSTER_MIN_RATIO       - Min cluster ratio to keep (default: 0.01)
+    ISOLATION_FILTER        - Enable isolation filtering (default: false)
+    ISOLATION_RADIUS_PERCENTILE - Search radius percentile (default: 10)
+    ISOLATION_MIN_NEIGHBORS - Min neighbors to not be isolated (default: 3)
+    
     # Densification parameters:
     DENSIFY_K_NEIGHBORS     - Number of neighbors to interpolate from (default: 5)
     DENSIFY_JITTER          - Random offset factor for new Gaussians (default: 0.02)
@@ -350,6 +362,18 @@ def run_enhance_pipeline():
     floater_std_threshold = get_env_float('FLOATER_STD_THRESHOLD', 3.0)
     floater_min_opacity = get_env_float('FLOATER_MIN_OPACITY', 0.05)
     
+    # Aggressive floater removal parameters
+    sor_filter = get_env_bool('SOR_FILTER', False)
+    sor_k_neighbors = get_env_int('SOR_K_NEIGHBORS', 20)
+    sor_std_ratio = get_env_float('SOR_STD_RATIO', 2.0)
+    cluster_filter = get_env_bool('CLUSTER_FILTER', False)
+    cluster_eps_percentile = get_env_int('CLUSTER_EPS_PERCENTILE', 5)
+    cluster_min_samples = get_env_int('CLUSTER_MIN_SAMPLES', 10)
+    cluster_min_ratio = get_env_float('CLUSTER_MIN_RATIO', 0.01)
+    isolation_filter = get_env_bool('ISOLATION_FILTER', False)
+    isolation_radius_percentile = get_env_int('ISOLATION_RADIUS_PERCENTILE', 10)
+    isolation_min_neighbors = get_env_int('ISOLATION_MIN_NEIGHBORS', 3)
+    
     # Densification parameters
     densify_k_neighbors = get_env_int('DENSIFY_K_NEIGHBORS', 5)
     densify_jitter = get_env_float('DENSIFY_JITTER', 0.02)
@@ -401,6 +425,9 @@ def run_enhance_pipeline():
         print()
         print("  CONFIGURATION:")
         print(f"    REMOVE_FLOATERS:           {remove_floaters}")
+        print(f"    SOR_FILTER:                {sor_filter}")
+        print(f"    CLUSTER_FILTER:            {cluster_filter}")
+        print(f"    ISOLATION_FILTER:          {isolation_filter}")
         print(f"    DENSIFY_SPARSE:            {densify_sparse}")
         print(f"    SPLIT_LARGE:               {split_large}")
         print(f"    FLATTEN_PLANES:            {flatten_planes}")
@@ -411,6 +438,16 @@ def run_enhance_pipeline():
         if remove_floaters:
             print(f"    FLOATER_STD_THRESHOLD:     {floater_std_threshold}")
             print(f"    FLOATER_MIN_OPACITY:       {floater_min_opacity}")
+        if sor_filter:
+            print(f"    SOR_K_NEIGHBORS:           {sor_k_neighbors}")
+            print(f"    SOR_STD_RATIO:             {sor_std_ratio}")
+        if cluster_filter:
+            print(f"    CLUSTER_EPS_PERCENTILE:    {cluster_eps_percentile}")
+            print(f"    CLUSTER_MIN_SAMPLES:       {cluster_min_samples}")
+            print(f"    CLUSTER_MIN_RATIO:         {cluster_min_ratio}")
+        if isolation_filter:
+            print(f"    ISOLATION_RADIUS_PERCENTILE: {isolation_radius_percentile}")
+            print(f"    ISOLATION_MIN_NEIGHBORS:   {isolation_min_neighbors}")
         if densify_sparse:
             print(f"    DENSIFY_K_NEIGHBORS:       {densify_k_neighbors}")
             print(f"    DENSIFY_JITTER:            {densify_jitter}")
@@ -444,10 +481,20 @@ def run_enhance_pipeline():
             plane_detection_enabled=flatten_planes,
             depth_consistency_enabled=depth_filter,
             thickness_compression_enabled=compress_thickness,
+            sor_filter_enabled=sor_filter,
+            cluster_filter_enabled=cluster_filter,
+            isolation_filter_enabled=isolation_filter,
             grid_resolution=grid_resolution,
             density_threshold_percentile=density_threshold,
             floater_std_threshold=floater_std_threshold,
             floater_min_opacity=floater_min_opacity,
+            sor_k_neighbors=sor_k_neighbors,
+            sor_std_ratio=sor_std_ratio,
+            cluster_eps_percentile=cluster_eps_percentile,
+            cluster_min_samples=cluster_min_samples,
+            cluster_min_ratio=cluster_min_ratio,
+            isolation_radius_percentile=isolation_radius_percentile,
+            isolation_min_neighbors=isolation_min_neighbors,
             densify_k_neighbors=densify_k_neighbors,
             densify_jitter=densify_jitter,
             split_threshold_percentile=split_threshold_percentile,
@@ -477,6 +524,12 @@ def run_enhance_pipeline():
             print()
             print(f"  CHANGES:")
             print(f"    Floaters removed:      {stats.get('floaters_removed', 0):,}")
+            if sor_filter:
+                print(f"    SOR outliers removed:  {stats.get('sor_removed', 0):,}")
+            if cluster_filter:
+                print(f"    Cluster outliers:      {stats.get('cluster_removed', 0):,}")
+            if isolation_filter:
+                print(f"    Isolated removed:      {stats.get('isolated_removed', 0):,}")
             if flatten_planes:
                 print(f"    Planes detected:       {stats.get('planes_detected', 0)}")
                 print(f"    Flattened to planes:   {stats.get('plane_flattened', 0):,}")

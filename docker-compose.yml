@@ -221,6 +221,71 @@ services:
       - FLOATER_MIN_OPACITY=0.05
       
       # ============================================================
+      # Aggressive Floater Removal (for messy scans with lots of artifacts)
+      # These filters aggressively remove isolated points, small clusters, and specks
+      # ============================================================
+      
+      # SOR_FILTER: Enable Statistical Outlier Removal
+      # - true: Remove points with unusually large average neighbor distance
+      # - false: Skip SOR filtering
+      # - Default: false (enable for aggressive cleanup)
+      - SOR_FILTER=false
+      
+      # SOR_K_NEIGHBORS: Number of neighbors to consider for SOR
+      # - Lower values (10-15): Faster, less context
+      # - Higher values (25-40): More thorough, slower
+      # - Default: 20
+      - SOR_K_NEIGHBORS=20
+      
+      # SOR_STD_RATIO: Std ratio threshold for SOR (lower = more aggressive)
+      # - Lower values (1.0-1.5): Aggressive, removes more points
+      # - Higher values (2.5-4.0): Permissive, keeps more points
+      # - Default: 2.0
+      - SOR_STD_RATIO=2.0
+      
+      # CLUSTER_FILTER: Enable DBSCAN cluster-based filtering
+      # - true: Find main cluster(s) and remove small isolated groups
+      # - false: Skip cluster filtering
+      # - Default: false (enable to remove isolated clusters)
+      - CLUSTER_FILTER=false
+      
+      # CLUSTER_EPS_PERCENTILE: DBSCAN epsilon as percentile of nearest neighbor distances
+      # - Lower values (2-5): Tighter clusters, may split legitimate geometry
+      # - Higher values (8-15): Looser clusters, may merge artifacts with main geometry
+      # - Default: 5
+      - CLUSTER_EPS_PERCENTILE=5
+      
+      # CLUSTER_MIN_SAMPLES: Minimum points for a DBSCAN core point
+      # - Lower values (5-8): More lenient clustering
+      # - Higher values (15-25): Stricter, requires denser regions
+      # - Default: 10
+      - CLUSTER_MIN_SAMPLES=10
+      
+      # CLUSTER_MIN_RATIO: Minimum cluster size as ratio of total points to keep
+      # - Lower values (0.005-0.01): Keep smaller clusters
+      # - Higher values (0.02-0.05): Only keep large clusters
+      # - Default: 0.01 (1%)
+      - CLUSTER_MIN_RATIO=0.01
+      
+      # ISOLATION_FILTER: Enable isolated Gaussian removal
+      # - true: Remove Gaussians with too few neighbors in local area
+      # - false: Skip isolation filtering
+      # - Default: false (enable to remove specks)
+      - ISOLATION_FILTER=false
+      
+      # ISOLATION_RADIUS_PERCENTILE: Search radius as percentile of all distances
+      # - Lower values (5-10): Smaller search radius, removes more
+      # - Higher values (15-25): Larger search radius, keeps more
+      # - Default: 10
+      - ISOLATION_RADIUS_PERCENTILE=10
+      
+      # ISOLATION_MIN_NEIGHBORS: Minimum neighbors required within radius
+      # - Lower values (1-2): Very lenient, keeps most points
+      # - Higher values (5-10): Strict, removes sparse areas
+      # - Default: 3
+      - ISOLATION_MIN_NEIGHBORS=3
+      
+      # ============================================================
       # Densification Parameters (used when DENSIFY_SPARSE=true)
       # ============================================================
       
